@@ -3,6 +3,7 @@
 An iOS Ludo game built with Swift, UIKit, and SpriteKit. The project includes a pass-and-play setup flow, animated board scene, custom dice, player tokens, and power-up mechanics.
 
 ![Ludo game preview](docs/screenshots/ludo-game-preview.svg)
+<img width="1206" height="2622" alt="Simulator Screenshot - iPhone 17 Pro - 2026-08-02 at 00 33 33" src="https://github.com/user-attachments/assets/dbd32184-b7bc-4442-8085-5761d5ccdd20" />
 
 ## Features
 
