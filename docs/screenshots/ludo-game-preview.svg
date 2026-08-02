@@ -1,0 +1,48 @@
+<svg width="1100" height="620" viewBox="0 0 1100 620" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Ludo game preview</title>
+  <desc id="desc">A preview of the Ludo game board, player tokens, dice, and power-up interface.</desc>
+  <rect width="1100" height="620" rx="28" fill="#20342b"/>
+  <rect x="54" y="48" width="992" height="524" rx="24" fill="#13231c" stroke="#7db26c" stroke-width="2"/>
+  <text x="94" y="108" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="48" font-weight="700">Ludo</text>
+  <text x="96" y="146" fill="#c9d8cd" font-family="Arial, Helvetica, sans-serif" font-size="20">Pass-and-play iOS Ludo with SpriteKit, custom board logic, power-ups, and animated dice.</text>
+
+  <g transform="translate(110 188)">
+    <rect width="360" height="360" rx="22" fill="#f5f0dd"/>
+    <rect x="20" y="20" width="120" height="120" rx="18" fill="#2ca24d"/>
+    <rect x="220" y="20" width="120" height="120" rx="18" fill="#d94b47"/>
+    <rect x="20" y="220" width="120" height="120" rx="18" fill="#e5be38"/>
+    <rect x="220" y="220" width="120" height="120" rx="18" fill="#3b74d8"/>
+    <rect x="144" y="144" width="72" height="72" rx="12" fill="#efe2bc" stroke="#493f2b" stroke-width="3"/>
+    <path d="M180 144 L216 180 L180 216 L144 180 Z" fill="#6b4f2e"/>
+    <g fill="#fff" opacity="0.92">
+      <circle cx="58" cy="58" r="16"/><circle cx="102" cy="58" r="16"/><circle cx="58" cy="102" r="16"/><circle cx="102" cy="102" r="16"/>
+      <circle cx="258" cy="58" r="16"/><circle cx="302" cy="58" r="16"/><circle cx="258" cy="102" r="16"/><circle cx="302" cy="102" r="16"/>
+      <circle cx="58" cy="258" r="16"/><circle cx="102" cy="258" r="16"/><circle cx="58" cy="302" r="16"/><circle cx="102" cy="302" r="16"/>
+      <circle cx="258" cy="258" r="16"/><circle cx="302" cy="258" r="16"/><circle cx="258" cy="302" r="16"/><circle cx="302" cy="302" r="16"/>
+    </g>
+    <g stroke="#493f2b" stroke-width="2">
+      <line x1="160" y1="20" x2="160" y2="340"/><line x1="200" y1="20" x2="200" y2="340"/>
+      <line x1="20" y1="160" x2="340" y2="160"/><line x1="20" y1="200" x2="340" y2="200"/>
+    </g>
+    <g fill="#111827">
+      <circle cx="180" cy="54" r="6"/><circle cx="180" cy="94" r="6"/><circle cx="180" cy="266" r="6"/><circle cx="180" cy="306" r="6"/>
+      <circle cx="54" cy="180" r="6"/><circle cx="94" cy="180" r="6"/><circle cx="266" cy="180" r="6"/><circle cx="306" cy="180" r="6"/>
+    </g>
+  </g>
+
+  <g transform="translate(545 210)">
+    <rect width="420" height="310" rx="18" fill="#0e1712" stroke="#304d3b" stroke-width="2"/>
+    <text x="30" y="54" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="28" font-weight="700">Game HUD</text>
+    <text x="30" y="94" fill="#c9d8cd" font-family="Arial, Helvetica, sans-serif" font-size="18">Current turn: Green</text>
+    <rect x="30" y="124" width="110" height="110" rx="18" fill="#f6f2df"/>
+    <circle cx="66" cy="160" r="8" fill="#1b1b1b"/>
+    <circle cx="105" cy="160" r="8" fill="#1b1b1b"/>
+    <circle cx="66" cy="199" r="8" fill="#1b1b1b"/>
+    <circle cx="105" cy="199" r="8" fill="#1b1b1b"/>
+    <rect x="170" y="124" width="190" height="42" rx="21" fill="#7db26c"/>
+    <text x="265" y="151" text-anchor="middle" fill="#102016" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700">Roll Dice</text>
+    <rect x="170" y="184" width="190" height="42" rx="21" fill="#2e4d3a"/>
+    <text x="265" y="211" text-anchor="middle" fill="#d7eadc" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700">Power-ups</text>
+    <text x="30" y="270" fill="#9fc9aa" font-family="Arial, Helvetica, sans-serif" font-size="18">Trap, blackhole, freeze, shield, and dash mechanics</text>
+  </g>
+</svg>
