@@ -1,0 +1,1289 @@
+import SpriteKit
+
+@MainActor
+final class GameScene: SKScene {
+
+    /// Set from `GameViewController` to return to the home flow (dismisses the game).
+    var onRequestMenu: (() -> Void)?
+
+    private let boardContainer = SKNode()
+    private let hudContainer = SKNode()
+    private let diceContainer = SKNode()
+    private let menuContainer = SKNode()
+    private let playerCount: Int
+
+    private let engine: LudoPassAndPlayEngine
+    private var tokenNodes: [LudoSeat: [SKShapeNode]] = [:]
+
+    private var diceNode: LudoDiceNode?
+    private var lastRollLabel: SKLabelNode?
+    private var modeLabel: SKLabelNode?
+    private var turnLabel: SKLabelNode?
+    private var hintLabel: SKLabelNode?
+
+    private var didResolveOpening = false
+    private var openingAnimationRunning = false
+    private var gameplayRollInFlight = false
+    private var pendingOpeningOutcome: LudoOpeningOutcome?
+    private var gameOverLayer: SKNode?
+
+    #if DEBUG
+    private var debugPanelRoot: SKNode?
+    private var debugStagedRoll: Int?
+    private var debugStagedLabel: SKLabelNode?
+    private var debugStatusLabel: SKLabelNode?
+    private var debugPwrStatusLabel: SKLabelNode?
+    private var debugSheet: SKShapeNode?
+    private var debugPageDice: SKNode?
+    private var debugPagePowerups: SKNode?
+    private var debugSubTab: DebugSubTab = .dice
+    private var debugSelectedPowerup: LudoPowerup = .dash
+    private var debugTargetSeat: LudoSeat = .green
+    private var debugTargetTokenId: Int = 0
+    private var debugPowerupArmTap = false
+
+    private enum DebugSubTab {
+        case dice
+        case powerups
+    }
+    #endif
+
+    override init(size: CGSize) {
+        self.playerCount = 4
+        self.engine = LudoPassAndPlayEngine(playerCount: 4)
+        super.init(size: size)
+        commonInit()
+    }
+
+    init(size: CGSize, playerCount: Int) {
+        let n = min(4, max(2, playerCount))
+        self.playerCount = n
+        self.engine = LudoPassAndPlayEngine(playerCount: n)
+        super.init(size: size)
+        commonInit()
+    }
+
+    required init?(coder aDecoder: NSCoder) {
+        self.playerCount = 4
+        self.engine = LudoPassAndPlayEngine(playerCount: 4)
+        super.init(coder: aDecoder)
+        commonInit()
+    }
+
+    private func commonInit() {
+        anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        scaleMode = .resizeFill
+        backgroundColor = SKColor(red: 0.22, green: 0.32, blue: 0.24, alpha: 1)
+    }
+
+    override func didMove(to view: SKView) {
+        #if DEBUG
+        debugPanelRoot?.removeFromParent()
+        debugPanelRoot = nil
+        debugPowerupArmTap = false
+        #endif
+        removeAllChildren()
+        gameOverLayer = nil
+        boardContainer.removeAllChildren()
+        hudContainer.removeAllChildren()
+        diceContainer.removeAllChildren()
+
+        addChild(boardContainer)
+        addChild(hudContainer)
+        addChild(diceContainer)
+        addChild(menuContainer)
+        hudContainer.zPosition = 100
+        diceContainer.zPosition = 101
+        menuContainer.zPosition = 102
+
+
+        layoutBoard()
+        layoutModeHUD()
+        setupHudLabelsIfNeeded()
+        setupDiceIfNeeded()
+        layoutDice()
+        setupMenuIfNeeded()
+        setupPowerupsTabIfNeeded()
+        #if DEBUG
+        setupDebugTabIfNeeded()
+        #endif
+        layoutMenu()
+        syncTokenPositionsFromEngine()
+        refreshTokenVisuals()
+
+        if engine.isGameOver {
+            presentGameOverOverlay(placementLines: engine.gameOverSummaryLines())
+        }
+
+        if !didResolveOpening {
+            didResolveOpening = true
+            let outcome = engine.resolveOpening()
+            pendingOpeningOutcome = outcome
+            if outcome.rounds.isEmpty {
+                openingAnimationRunning = false
+                finishOpeningBanner()
+            } else {
+                openingAnimationRunning = true
+                turnLabel?.text = "Opening rolls…"
+                hintLabel?.text = ""
+                chainOpeningRoll(roundIndex: 0, rollIndex: 0)
+            }
+        }
+    }
+
+    override func didChangeSize(_ oldSize: CGSize) {
+        super.didChangeSize(oldSize)
+        layoutBoard()
+        layoutModeHUD()
+        layoutHudLabels()
+        layoutDice()
+        layoutMenu()
+        relayoutGameOverOverlayIfNeeded()
+        syncTokenPositionsFromEngine()
+    }
+
+    private func layoutBoard() {
+        boardContainer.removeAllChildren()
+        tokenNodes = LudoBoardBuilder.buildBoard(in: boardContainer, playerCount: playerCount)
+
+        let boardSpanPoints = LudoBoardBuilder.worldBoardSpan
+        let s = min(size.width, size.height) * 0.97 / boardSpanPoints
+        boardContainer.setScale(s)
+    }
+
+    private func hudMessageMaxWidth() -> CGFloat {
+        min(380, max(260, size.width - 36))
+    }
+
+    private func setupHudLabelsIfNeeded() {
+        let maxW = hudMessageMaxWidth()
+        if turnLabel == nil {
+            let t = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
+            t.fontSize = 15
+            t.fontColor = SKColor(white: 1, alpha: 0.95)
+            t.verticalAlignmentMode = .top
+            t.horizontalAlignmentMode = .center
+            t.numberOfLines = 0
+            t.preferredMaxLayoutWidth = maxW
+            turnLabel = t
+            hudContainer.addChild(t)
+        }
+        if hintLabel == nil {
+            let h = SKLabelNode(fontNamed: "AvenirNext-Medium")
+            h.fontSize = 13
+            h.fontColor = SKColor(white: 1, alpha: 0.72)
+            h.verticalAlignmentMode = .top
+            h.horizontalAlignmentMode = .center
+            h.numberOfLines = 0
+            h.preferredMaxLayoutWidth = maxW
+            hintLabel = h
+            hudContainer.addChild(h)
+        }
+        layoutHudLabels()
+    }
+
+    private func layoutHudLabels() {
+        let maxW = hudMessageMaxWidth()
+        turnLabel?.preferredMaxLayoutWidth = maxW
+        hintLabel?.preferredMaxLayoutWidth = maxW
+        turnLabel?.position = CGPoint(x: 0, y: size.height * 0.5 - 118)
+        hintLabel?.position = CGPoint(x: 0, y: size.height * 0.5 - 188)
+    }
+
+    private func updateTurnLabel(_ text: String) {
+        setupHudLabelsIfNeeded()
+        turnLabel?.text = text
+    }
+
+    private func updateHintLabel(_ text: String) {
+        setupHudLabelsIfNeeded()
+        hintLabel?.text = text
+    }
+
+    private static let extraRollHint = "Roll again (6, capture, or reaching HOME)."
+
+    private func setupDiceIfNeeded() {
+        if diceNode == nil {
+            let die = min(64, max(48, size.width * 0.13))
+            let node = LudoDiceNode(dieSize: die)
+            node.name = "diceArea"
+            diceNode = node
+        }
+        if diceNode?.parent == nil, let node = diceNode {
+            diceContainer.addChild(node)
+        }
+
+        if lastRollLabel == nil {
+            let label = SKLabelNode(fontNamed: "AvenirNext-Medium")
+            label.fontSize = 15
+            label.fontColor = SKColor(white: 0.9, alpha: 0.85)
+            label.text = "Tap die to roll"
+            label.verticalAlignmentMode = .top
+            label.horizontalAlignmentMode = .center
+            lastRollLabel = label
+        }
+        if lastRollLabel?.parent == nil, let label = lastRollLabel {
+            diceContainer.addChild(label)
+        }
+
+        if modeLabel == nil {
+            let label = SKLabelNode(fontNamed: "AvenirNext-Medium")
+            label.fontSize = 16
+            label.fontColor = SKColor(white: 1, alpha: 0.82)
+            label.verticalAlignmentMode = .center
+            label.horizontalAlignmentMode = .center
+            modeLabel = label
+        }
+        if modeLabel?.parent == nil, let label = modeLabel {
+            hudContainer.addChild(label)
+        }
+    }
+
+    private func layoutModeHUD() {
+        if playerCount == 2 {
+            modeLabel?.text = "Pass and play · green vs red"
+        } else {
+            modeLabel?.text = "Pass and play · \(playerCount) players"
+        }
+        modeLabel?.position = CGPoint(x: 0, y: size.height * 0.5 - 118)
+    }
+
+    private func setupMenuIfNeeded() {
+        guard menuContainer.childNode(withName: "menuTap") == nil else { return }
+        let w: CGFloat = 112
+        let h: CGFloat = 40
+        let pad = SKShapeNode(rectOf: CGSize(width: w, height: h), cornerRadius: 10)
+        pad.fillColor = SKColor(white: 1, alpha: 0.18)
+        pad.strokeColor = SKColor(white: 1, alpha: 0.45)
+        pad.lineWidth = 1.2
+        pad.name = "menuTap"
+        menuContainer.addChild(pad)
+
+        let label = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
+        label.text = "Menu"
+        label.fontSize = 17
+        label.fontColor = SKColor(white: 1, alpha: 0.92)
+        label.verticalAlignmentMode = .center
+        label.horizontalAlignmentMode = .center
+        label.name = "menuLabel"
+        menuContainer.addChild(label)
+    }
+
+    private func setupPowerupsTabIfNeeded() {
+        guard menuContainer.childNode(withName: "powerupsTabTap") == nil else { return }
+        let w: CGFloat = 112
+        let h: CGFloat = 40
+        let pad = SKShapeNode(rectOf: CGSize(width: w, height: h), cornerRadius: 10)
+        pad.fillColor = SKColor(red: 0.35, green: 0.28, blue: 0.55, alpha: 0.45)
+        pad.strokeColor = SKColor(red: 0.75, green: 0.65, blue: 1, alpha: 0.55)
+        pad.lineWidth = 1.2
+        pad.position = CGPoint(x: 124, y: 0)
+        pad.name = "powerupsTabTap"
+        menuContainer.addChild(pad)
+
+        let label = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
+        label.text = "Powerups"
+        label.fontSize = 15
+        label.fontColor = SKColor(red: 0.92, green: 0.88, blue: 1, alpha: 0.96)
+        label.verticalAlignmentMode = .center
+        label.horizontalAlignmentMode = .center
+        label.position = CGPoint(x: 124, y: 0)
+        label.name = "powerupsTabLabel"
+        menuContainer.addChild(label)
+    }
+
+    private func layoutMenu() {
+        let insetX: CGFloat = 16
+        let insetY: CGFloat = 20
+        let x = -size.width * 0.5 + insetX + 56
+        let y = -size.height * 0.5 + insetY + 20
+        menuContainer.position = CGPoint(x: x, y: y)
+    }
+
+    private func rarityColor(_ rarity: LudoPowerupRarity) -> SKColor {
+        switch rarity {
+        case .common: return SKColor(red: 0.75, green: 0.82, blue: 0.78, alpha: 1)
+        case .rare: return SKColor(red: 0.45, green: 0.72, blue: 1, alpha: 1)
+        case .epic: return SKColor(red: 0.78, green: 0.5, blue: 1, alpha: 1)
+        case .legendary: return SKColor(red: 1, green: 0.78, blue: 0.35, alpha: 1)
+        case .bad: return SKColor(red: 1, green: 0.42, blue: 0.38, alpha: 1)
+        }
+    }
+
+    private func dismissPowerupsCatalog() {
+        powerupsCatalogRoot?.removeFromParent()
+        powerupsCatalogRoot = nil
+        catalogScrollContent = nil
+        catalogScrollOffset = 0
+        catalogScrollMaxOffset = 0
+        catalogScrollDrag = nil
+    }
+
+    private func applyCatalogScrollOffset() {
+        catalogScrollContent?.position.y = catalogScrollOffset
+    }
+
+    private func catalogScrollViewportContains(_ scenePoint: CGPoint) -> Bool {
+        guard let crop = catalogScrollContent?.parent as? SKCropNode else { return false }
+        let local = crop.convert(scenePoint, from: self)
+        guard let mask = crop.maskNode as? SKShapeNode, let path = mask.path else { return false }
+        return path.contains(local)
+    }
+
+    @discardableResult
+    private func handleCatalogScrollBegan(_ touch: UITouch) -> Bool {
+        guard catalogScrollContent != nil, catalogScrollMaxOffset > 0 else { return false }
+        let loc = touch.location(in: self)
+        guard catalogScrollViewportContains(loc) else { return false }
+        catalogScrollDrag = (startSceneY: loc.y, startOffset: catalogScrollOffset)
+        return true
+    }
+
+    @discardableResult
+    private func handleCatalogScrollMoved(_ touch: UITouch) -> Bool {
+        guard let drag = catalogScrollDrag else { return false }
+        let loc = touch.location(in: self)
+        let delta = loc.y - drag.startSceneY
+        catalogScrollOffset = min(catalogScrollMaxOffset, max(0, drag.startOffset + delta))
+        applyCatalogScrollOffset()
+        return true
+    }
+
+    @discardableResult
+    private func handleCatalogScrollEnded() -> Bool {
+        guard catalogScrollDrag != nil else { return false }
+        catalogScrollDrag = nil
+        return true
+    }
+
+    private func togglePowerupsCatalog() {
+        if powerupsCatalogRoot != nil {
+            dismissPowerupsCatalog()
+        } else {
+            #if DEBUG
+            dismissDebugPanel()
+            #endif
+            presentPowerupsCatalog()
+        }
+    }
+
+    private func powerupCatalogRowHeight(for powerup: LudoPowerup, textWidth: CGFloat) -> CGFloat {
+        let desc = powerup.effectSummary
+        let charsPerLine = max(18, Int(textWidth / 6.5))
+        let lineCount = max(1, (desc.count + charsPerLine - 1) / charsPerLine)
+        let titleBlock: CGFloat = 24
+        let descBlock = CGFloat(lineCount) * 14
+        return 14 + titleBlock + 8 + descBlock + 14
+    }
+
+    private func presentPowerupsCatalog() {
+        let savedOffset = catalogScrollOffset
+        dismissPowerupsCatalog()
+        catalogScrollOffset = savedOffset
+        dismissPowerupBanner()
+
+        let root = SKNode()
+        root.name = "powerupsCatalogRoot"
+        root.zPosition = 160
+
+        let dim = SKShapeNode(rectOf: CGSize(width: size.width + 8, height: size.height + 8))
+        dim.fillColor = SKColor(white: 0, alpha: 0.5)
+        dim.strokeColor = .clear
+        dim.name = "powerupsCatalogDismiss"
+        root.addChild(dim)
+
+        let panelW = min(360, max(300, size.width * 0.9))
+        let marginH: CGFloat = 20
+        let headerBlockH: CGFloat = 70
+        let sectionHeaderH: CGFloat = 26
+        let sectionGap: CGFloat = 10
+        let footerH: CGFloat = 48
+        let textWidth = panelW - marginH * 2 - 56
+        let panelH = min(max(280, size.height * 0.82), size.height - 40)
+
+        let panel = SKShapeNode(rectOf: CGSize(width: panelW, height: panelH), cornerRadius: 18)
+        panel.fillColor = SKColor(white: 0.1, alpha: 0.98)
+        panel.strokeColor = SKColor(white: 0.5, alpha: 0.7)
+        panel.lineWidth = 1.5
+        root.addChild(panel)
+
+        let left = -panelW * 0.5 + marginH
+        let textX = left + 52
+
+        let title = SKLabelNode(fontNamed: "AvenirNext-Bold")
+        title.text = "Powerups"
+        title.fontSize = 24
+        title.fontColor = SKColor(white: 1, alpha: 0.98)
+        title.verticalAlignmentMode = .center
+        title.horizontalAlignmentMode = .center
+        title.position = CGPoint(x: 0, y: panelH * 0.5 - 28)
+        panel.addChild(title)
+
+        let subtitle = SKLabelNode(fontNamed: "AvenirNext-Regular")
+        subtitle.text = "Mystery tile rewards · by rarity"
+        subtitle.fontSize = 12
+        subtitle.fontColor = SKColor(white: 0.62, alpha: 0.92)
+        subtitle.verticalAlignmentMode = .center
+        subtitle.horizontalAlignmentMode = .center
+        subtitle.position = CGPoint(x: 0, y: panelH * 0.5 - 50)
+        panel.addChild(subtitle)
+
+        let headerRule = SKShapeNode(rectOf: CGSize(width: panelW - marginH * 2, height: 1))
+        headerRule.fillColor = SKColor(white: 1, alpha: 0.12)
+        headerRule.strokeColor = .clear
+        headerRule.position = CGPoint(x: 0, y: panelH * 0.5 - headerBlockH + 6)
+        panel.addChild(headerRule)
+
+        let scrollTop = panelH * 0.5 - headerBlockH
+        let scrollBottom = -panelH * 0.5 + footerH
+        let viewportH = scrollTop - scrollBottom
+        let viewportCenterY = (scrollTop + scrollBottom) * 0.5
+
+        let crop = SKCropNode()
+        crop.name = "catalogScrollCrop"
+        crop.position = CGPoint(x: 0, y: viewportCenterY)
+        let mask = SKShapeNode(rectOf: CGSize(width: panelW - marginH * 2, height: viewportH))
+        mask.fillColor = .white
+        mask.strokeColor = .clear
+        crop.maskNode = mask
+        panel.addChild(crop)
+
+        let content = SKNode()
+        content.name = "catalogScrollContent"
+        crop.addChild(content)
+        catalogScrollContent = content
+
+        let grouped = LudoPowerup.catalogGroupedByRarity()
+        var y = viewportH * 0.5
+        for (rarity, powerups) in grouped {
+            let sectionY = y - sectionHeaderH * 0.5
+            let header = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
+            header.text = rarity.displayTitle
+            header.fontSize = 12
+            header.fontColor = rarityColor(rarity)
+            header.verticalAlignmentMode = .center
+            header.horizontalAlignmentMode = .left
+            header.position = CGPoint(x: left, y: sectionY)
+            content.addChild(header)
+            y -= sectionHeaderH + sectionGap
+
+            for p in powerups {
+                let rowH = powerupCatalogRowHeight(for: p, textWidth: textWidth)
+                let rowTop = y
+                let rowCenter = y - rowH * 0.5
+
+                let rowBg = SKShapeNode(rectOf: CGSize(width: panelW - marginH * 2, height: rowH - 4), cornerRadius: 10)
+                rowBg.fillColor = SKColor(white: 1, alpha: 0.04)
+                rowBg.strokeColor = SKColor(white: 1, alpha: 0.08)
+                rowBg.lineWidth = 1
+                rowBg.position = CGPoint(x: 0, y: rowCenter)
+                content.addChild(rowBg)
+
+                let rowIcon = LudoPowerupIcon.makeIcon(for: p, size: 40)
+                rowIcon.position = CGPoint(x: left + 22, y: rowCenter)
+                content.addChild(rowIcon)
+
+                let nameY = rowTop - 18
+                let name = SKLabelNode(fontNamed: "AvenirNext-Bold")
+                name.text = p.displayName
+                name.fontSize = 16
+                name.fontColor = SKColor(white: 1, alpha: 0.96)
+                name.verticalAlignmentMode = .center
+                name.horizontalAlignmentMode = .left
+                name.position = CGPoint(x: textX, y: nameY)
+                content.addChild(name)
+
+                if !p.isImplemented {
+                    let soon = SKLabelNode(fontNamed: "AvenirNext-Medium")
+                    soon.text = "Coming soon"
+                    soon.fontSize = 10
+                    soon.fontColor = SKColor(white: 0.5, alpha: 0.88)
+                    soon.verticalAlignmentMode = .center
+                    soon.horizontalAlignmentMode = .right
+                    soon.position = CGPoint(x: panelW * 0.5 - marginH, y: nameY)
+                    content.addChild(soon)
+                }
+
+                let body = SKLabelNode(fontNamed: "AvenirNext-Regular")
+                body.text = p.effectSummary
+                body.fontSize = 11
+                body.fontColor = SKColor(white: 0.72, alpha: 0.94)
+                body.verticalAlignmentMode = .top
+                body.horizontalAlignmentMode = .left
+                body.preferredMaxLayoutWidth = textWidth
+                body.numberOfLines = 0
+                body.position = CGPoint(x: textX, y: nameY - 20)
+                content.addChild(body)
+
+                y -= rowH
+            }
+            y -= 4
+        }
+
+        let contentH = viewportH * 0.5 - y + 8
+        catalogScrollMaxOffset = max(0, contentH - viewportH)
+        catalogScrollOffset = min(catalogScrollOffset, catalogScrollMaxOffset)
+        applyCatalogScrollOffset()
+
+        if catalogScrollMaxOffset > 0 {
+            let hint = SKLabelNode(fontNamed: "AvenirNext-Regular")
+            hint.text = "Scroll for more"
+            hint.fontSize = 10
+            hint.fontColor = SKColor(white: 0.45, alpha: 0.85)
+            hint.verticalAlignmentMode = .center
+            hint.horizontalAlignmentMode = .center
+            hint.position = CGPoint(x: 0, y: scrollBottom + 10)
+            panel.addChild(hint)
+        }
+
+        let closeW: CGFloat = 120
+        let closeH: CGFloat = 34
+        let closeBg = SKShapeNode(rectOf: CGSize(width: closeW, height: closeH), cornerRadius: closeH * 0.5)
+        closeBg.fillColor = SKColor(red: 0.2, green: 0.38, blue: 0.55, alpha: 1)
+        closeBg.strokeColor = SKColor(red: 0.45, green: 0.7, blue: 1, alpha: 0.85)
+        closeBg.lineWidth = 1.2
+        closeBg.position = CGPoint(x: 0, y: -panelH * 0.5 + footerH * 0.5)
+        closeBg.name = "powerupsCatalogDismiss"
+        panel.addChild(closeBg)
+
+        let close = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
+        close.text = "Close"
+        close.fontSize = 15
+        close.fontColor = SKColor(white: 1, alpha: 0.96)
+        close.verticalAlignmentMode = .center
+        close.horizontalAlignmentMode = .center
+        close.position = CGPoint(x: 0, y: -panelH * 0.5 + footerH * 0.5)
+        close.name = "powerupsCatalogDismiss"
+        panel.addChild(close)
+
+        addChild(root)
+        powerupsCatalogRoot = root
+    }
+
+    private func relayoutPowerupsCatalogIfNeeded() {
+        guard powerupsCatalogRoot != nil else { return }
+        presentPowerupsCatalog()
+    }
+
+    private func layoutDice() {
+        setupDiceIfNeeded()
+        guard diceNode != nil else { return }
+
+        let top = size.height * 0.5 - 20
+        lastRollLabel?.position = CGPoint(x: 0, y: top)
+        lastRollLabel?.verticalAlignmentMode = .top
+        diceNode?.position = CGPoint(x: 0, y: top - 56)
+    }
+
+    // MARK: - Opening
+
+    private func chainOpeningRoll(roundIndex: Int, rollIndex: Int) {
+        guard let outcome = pendingOpeningOutcome else {
+            finishOpeningBanner()
+            return
+        }
+        if roundIndex >= outcome.rounds.count {
+            finishOpeningBanner()
+            return
+        }
+        let rolls = outcome.rounds[roundIndex].rolls
+        if rollIndex >= rolls.count {
+            chainOpeningRoll(roundIndex: roundIndex + 1, rollIndex: 0)
+            return
+        }
+        let seat = rolls[rollIndex].seat
+        let value = rolls[rollIndex].value
+        turnLabel?.text = "\(seat.displayName) rolls \(value)."
+        diceNode?.revealRoll(to: value) { [weak self] in
+            guard let self else { return }
+            self.run(
+                SKAction.sequence([
+                    SKAction.wait(forDuration: 0.4),
+                    SKAction.run { [weak self] in
+                        self?.chainOpeningRoll(roundIndex: roundIndex, rollIndex: rollIndex + 1)
+                    },
+                ])
+            )
+        }
+    }
+
+    private func finishOpeningBanner() {
+        openingAnimationRunning = false
+        guard let outcome = pendingOpeningOutcome else {
+            turnLabel?.text = "Roll the die."
+            hintLabel?.text = ""
+            return
+        }
+        pendingOpeningOutcome = nil
+        let fp = outcome.firstPlayer
+        turnLabel?.text = "\(fp.displayName) starts!"
+        hintLabel?.text = "Stars are safe (no capture). Capturing sends a rival to their yard and you roll again. Turn onto your home strip from the white square before it. Overshooting HOME is not allowed."
+        lastRollLabel?.text = "\(fp.displayName)'s turn — tap die"
+        #if DEBUG
+        refreshDebugPanel()
+        #endif
+    }
+
+    // MARK: - Gameplay
+
+    private func canAcceptGameplayRoll(allowWhileDebugPanelOpen: Bool = false) -> Bool {
+        guard gameOverLayer == nil, powerupsCatalogRoot == nil, swapConfirmRoot == nil,
+              trapPlacementContext == nil, freezeSelectionContext == nil,
+              shieldSelectionContext == nil else { return false }
+        #if DEBUG
+        if !allowWhileDebugPanelOpen, debugPanelRoot != nil { return false }
+        #endif
+        return !openingAnimationRunning
+            && !gameplayRollInFlight
+            && engine.pendingChoice == nil
+    }
+
+    private func canAcceptDiceRoll() -> Bool {
+        canAcceptGameplayRoll(allowWhileDebugPanelOpen: false)
+    }
+
+    private func handleGameplayRoll(_ value: Int) {
+        let outcome = engine.applyGameplayRoll(value)
+        lastRollLabel?.text = "Rolled \(value)"
+        switch outcome {
+        case .passedNoMove(let msg):
+            turnLabel?.text = msg
+            hintLabel?.text = "\(engine.currentSeat.displayName)'s turn — tap die."
+        case .needsTokenChoice(let roll, let yard, let track, let home):
+            turnLabel?.text = "\(engine.currentSeat.displayName) rolled \(roll). Pick a token."
+            if !yard.isEmpty {
+                hintLabel?.text = "Six: choose a yard piece, or another highlighted piece."
+            } else if !track.isEmpty, !home.isEmpty {
+                hintLabel?.text = "Tap track or home stretch — home moves cannot overshoot HOME."
+            } else if !home.isEmpty {
+                hintLabel?.text = "Tap a highlighted home-stretch piece (exact or short only)."
+            } else {
+                hintLabel?.text = "Tap a piece on the track to move \(roll) steps clockwise."
+            }
+            refreshTokenVisuals()
+        case .autoApplied(let msg, let grantsExtraRoll):
+            turnLabel?.text = msg
+            syncTokenPositionsFromEngine()
+            refreshTokenVisuals()
+            if grantsExtraRoll {
+                hintLabel?.text = Self.extraRollHint
+                lastRollLabel?.text = "\(engine.currentSeat.displayName) — tap die"
+            } else {
+                hintLabel?.text = "\(engine.currentSeat.displayName)'s turn — tap die."
+            }
+        case .gameOver(let lines, let summary):
+            turnLabel?.text = summary
+            hintLabel?.text = ""
+            lastRollLabel?.text = ""
+            syncTokenPositionsFromEngine()
+            refreshTokenVisuals()
+            if gameOverLayer == nil {
+                presentGameOverOverlay(placementLines: lines)
+            }
+        }
+        #if DEBUG
+        refreshDebugPanel()
+        #endif
+    }
+
+    private func handleTokenTap(seat: LudoSeat, tokenId: Int) {
+        #if DEBUG
+        if debugPowerupArmTap {
+            debugApplyPowerup(seat: seat, tokenId: tokenId)
+            return
+        }
+        #endif
+        guard gameOverLayer == nil, engine.pendingChoice != nil, seat == engine.currentSeat else { return }
+        guard let result = engine.applyTokenChoice(seat: seat, tokenId: tokenId) else { return }
+        switch result {
+        case .applied(let message, let grantsExtraRoll):
+            turnLabel?.text = message
+            syncTokenPositionsFromEngine()
+            refreshTokenVisuals()
+            if grantsExtraRoll {
+                hintLabel?.text = Self.extraRollHint
+                lastRollLabel?.text = "\(engine.currentSeat.displayName) — tap die"
+            } else {
+                hintLabel?.text = "\(engine.currentSeat.displayName)'s turn — tap die."
+            }
+        case .gameOver(let lines, let message):
+            turnLabel?.text = message
+            hintLabel?.text = ""
+            lastRollLabel?.text = ""
+            syncTokenPositionsFromEngine()
+            refreshTokenVisuals()
+            if gameOverLayer == nil {
+                presentGameOverOverlay(placementLines: lines)
+            }
+        }
+        #if DEBUG
+        refreshDebugPanel()
+        #endif
+    }
+
+    private func presentGameOverOverlay(placementLines: [String]) {
+        guard gameOverLayer == nil else { return }
+        let root = SKNode()
+        root.name = "gameOverRoot"
+        root.zPosition = 400
+
+        let w = size.width
+        let h = size.height
+        let dim = SKShapeNode(rectOf: CGSize(width: w + 4, height: h + 4))
+        dim.fillColor = SKColor(white: 0, alpha: 0.55)
+        dim.strokeColor = .clear
+        dim.position = .zero
+        root.addChild(dim)
+
+        let panelW = min(340, max(280, w * 0.88))
+        let lineCount = CGFloat(max(placementLines.count, 1))
+        let panelH = min(h * 0.72, 56 + lineCount * 28 + 120)
+        let panel = SKShapeNode(rectOf: CGSize(width: panelW, height: panelH), cornerRadius: 16)
+        panel.fillColor = SKColor(white: 0.14, alpha: 0.97)
+        panel.strokeColor = SKColor(white: 0.5, alpha: 0.5)
+        panel.lineWidth = 1.5
+        panel.position = .zero
+        root.addChild(panel)
+
+        let title = SKLabelNode(fontNamed: "AvenirNext-Bold")
+        title.text = "Game over"
+        title.fontSize = 26
+        title.fontColor = SKColor(white: 1, alpha: 0.96)
+        title.verticalAlignmentMode = .center
+        title.horizontalAlignmentMode = .center
+        title.position = CGPoint(x: 0, y: panelH * 0.5 - 36)
+        panel.addChild(title)
+
+        let body = SKLabelNode(fontNamed: "AvenirNext-Medium")
+        body.text = placementLines.joined(separator: "\n")
+        body.fontSize = 17
+        body.fontColor = SKColor(white: 0.92, alpha: 0.95)
+        body.verticalAlignmentMode = .top
+        body.horizontalAlignmentMode = .center
+        body.numberOfLines = 0
+        body.preferredMaxLayoutWidth = panelW - 32
+        body.position = CGPoint(x: 0, y: panelH * 0.5 - 72)
+        panel.addChild(body)
+
+        let btnW: CGFloat = 220
+        let btnH: CGFloat = 48
+        let btn = SKShapeNode(rectOf: CGSize(width: btnW, height: btnH), cornerRadius: 12)
+        btn.fillColor = SKColor(white: 0.96, alpha: 1)
+        btn.strokeColor = SKColor(white: 0.35, alpha: 0.6)
+        btn.lineWidth = 1.2
+        btn.name = "gameOverMainMenuTap"
+        btn.position = CGPoint(x: 0, y: -panelH * 0.5 + 48)
+        panel.addChild(btn)
+
+        let btnLabel = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
+        btnLabel.text = "Main menu"
+        btnLabel.fontSize = 19
+        btnLabel.fontColor = SKColor(red: 0.12, green: 0.22, blue: 0.14, alpha: 1)
+        btnLabel.verticalAlignmentMode = .center
+        btnLabel.horizontalAlignmentMode = .center
+        btnLabel.position = btn.position
+        btnLabel.name = "gameOverMainMenuTap"
+        panel.addChild(btnLabel)
+
+        addChild(root)
+        gameOverLayer = root
+    }
+
+    private func relayoutGameOverOverlayIfNeeded() {
+        guard engine.isGameOver else { return }
+        gameOverLayer?.removeFromParent()
+        gameOverLayer = nil
+        presentGameOverOverlay(placementLines: engine.gameOverSummaryLines())
+    }
+
+    // MARK: - Token layout
+
+    private func baseBoardPoint(seat: LudoSeat, tokenId: Int, spot: LudoTokenSpot) -> CGPoint {
+        switch spot {
+        case .yard:
+            let g = LudoBoardPath.yardCells(for: seat)[tokenId]
+            return LudoBoardBuilder.boardPoint(row: g.row, col: g.col)
+        case .track(let pathIndex, _):
+            let g = LudoBoardPath.publicTrack[(pathIndex % 52 + 52) % 52]
+            return LudoBoardBuilder.boardPoint(row: g.row, col: g.col)
+        case .home(let step):
+            let cells = LudoBoardPath.homeStretchCellsInGoalOrder(for: seat)
+            let g = cells[min(max(0, step), cells.count - 1)]
+            return LudoBoardBuilder.boardPoint(row: g.row, col: g.col)
+        case .finished:
+            let g = LudoBoardPath.goalHub
+            return LudoBoardBuilder.boardPoint(row: g.row, col: g.col)
+        }
+    }
+
+    private func bucketKey(seat: LudoSeat, tokenId: Int, spot: LudoTokenSpot) -> String {
+        switch spot {
+        case .yard:
+            let g = LudoBoardPath.yardCells(for: seat)[tokenId]
+            return "y_\(g.row)_\(g.col)"
+        case .track(let pathIndex, _):
+            return "t_\(pathIndex % 52)"
+        case .home(let step):
+            return "h_\(seat.rawValue)_\(step)"
+        case .finished:
+            return "f_\(seat.rawValue)_\(tokenId)"
+        }
+    }
+
+    private func syncTokenPositionsFromEngine() {
+        var buckets: [String: [(seat: LudoSeat, id: Int, spot: LudoTokenSpot)]] = [:]
+        for (seat, nodes) in tokenNodes {
+            for i in 0..<nodes.count {
+                guard let spot = engine.spot(for: seat, tokenId: i) else { continue }
+                let key = bucketKey(seat: seat, tokenId: i, spot: spot)
+                buckets[key, default: []].append((seat, i, spot))
+            }
+        }
+
+        for (_, group) in buckets {
+            let n = group.count
+            for (idx, item) in group.enumerated() {
+                guard let node = tokenNodes[item.seat]?[item.id] else { continue }
+                var p = baseBoardPoint(seat: item.seat, tokenId: item.id, spot: item.spot)
+                if n > 1 {
+                    let angle = CGFloat(idx) / CGFloat(n) * (.pi * 2)
+                    let r: CGFloat = 9
+                    p.x += cos(angle) * r
+                    p.y += sin(angle) * r
+                }
+                node.position = p
+            }
+        }
+    }
+
+    private func refreshTokenVisuals() {
+        let pending = engine.pendingChoice
+        let validFreezeTargets: Set<String> = if let ctx = freezeSelectionContext {
+            Set(engine.validFreezeTargets(for: ctx.applierSeat).map { "\($0.seat.rawValue)_\($0.tokenId)" })
+        } else {
+            []
+        }
+        let validShieldTargets: Set<String> = if let ctx = shieldSelectionContext {
+            Set(engine.validSmallShieldTargets(for: ctx.applierSeat).map { "\($0.seat.rawValue)_\($0.tokenId)" })
+        } else {
+            []
+        }
+        for (seat, nodes) in tokenNodes {
+            for i in 0..<nodes.count {
+                let node = nodes[i]
+                let frozen = engine.isTokenFrozen(owner: seat, tokenId: i)
+                updateFreezeBadge(on: node, show: frozen)
+                updateShieldBadge(on: node, kind: engine.shieldKind(for: seat, tokenId: i))
+                #if DEBUG
+                if debugPowerupArmTap {
+                    node.alpha = 1
+                    node.setScale(1.08)
+                    if let sp = engine.spot(for: seat, tokenId: i), case .finished = sp {
+                        node.alpha = min(node.alpha, 0.85)
+                    }
+                    continue
+                }
+                #endif
+                node.setScale(1)
+                if let ctx = freezeSelectionContext {
+                    let key = "\(seat.rawValue)_\(i)"
+                    if validFreezeTargets.contains(key) {
+                        node.alpha = 1
+                        node.setScale(1.12)
+                    } else if seat == ctx.applierSeat {
+                        node.alpha = 0.35
+                    } else {
+                        node.alpha = 0.28
+                    }
+                } else if let ctx = shieldSelectionContext {
+                    let key = "\(seat.rawValue)_\(i)"
+                    if validShieldTargets.contains(key) {
+                        node.alpha = 1
+                        node.setScale(1.12)
+                    } else {
+                        node.alpha = 0.28
+                    }
+                } else if let p = pending, seat == engine.currentSeat {
+                    let legal = p.legalYard.contains(i) || p.legalTrack.contains(i) || p.legalHome.contains(i)
+                    node.alpha = legal ? 1 : 0.32
+                } else if seat == engine.currentSeat {
+                    node.alpha = 1
+                } else {
+                    node.alpha = pending != nil ? 0.45 : 1
+                }
+                if let sp = engine.spot(for: seat, tokenId: i), case .finished = sp {
+                    node.alpha = min(node.alpha, 0.85)
+                }
+            }
+        }
+    }
+
+    // MARK: - Touches
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = touches.first else { return }
+
+        #if DEBUG
+        if handleDebugTouch(touch) { return }
+        #endif
+
+        let sceneLoc = touch.location(in: self)
+        for node in nodes(at: sceneLoc) {
+            var current: SKNode? = node
+            while let c = current {
+                if c.name == "gameOverMainMenuTap" {
+                    onRequestMenu?()
+                    return
+                }
+                current = c.parent
+            }
+        }
+
+        if let catalog = powerupsCatalogRoot {
+            let catLoc = touch.location(in: catalog)
+            for node in catalog.nodes(at: catLoc) {
+                var current: SKNode? = node
+                while let c = current {
+                    if c.name == "powerupsCatalogDismiss" {
+                        dismissPowerupsCatalog()
+                        return
+                    }
+                    current = c.parent
+                }
+            }
+            return
+        }
+
+        #if DEBUG
+        if debugPanelRoot != nil {
+            if handleDebugTouch(touch) { return }
+            if !debugPowerupArmTap { return }
+        }
+        if debugPowerupArmTap, let (seat, tid) = tokenHit(at: touch.location(in: boardContainer)) {
+            handleTokenTap(seat: seat, tokenId: tid)
+            return
+        }
+        #endif
+
+        let menuLoc = touch.location(in: menuContainer)
+        for node in menuContainer.nodes(at: menuLoc) {
+            var current: SKNode? = node
+            while let c = current {
+                if c.name == "menuTap" {
+                    onRequestMenu?()
+                    return
+                }
+                if c.name == "powerupsTabTap" {
+                    togglePowerupsCatalog()
+                    return
+                }
+                #if DEBUG
+                if c.name == "debugTabTap" {
+                    toggleDebugPanel()
+                    return
+                }
+                #endif
+                current = c.parent
+            }
+        }
+
+        if let (seat, tid) = tokenHit(at: touch.location(in: boardContainer)) {
+            if let ctx = freezeSelectionContext {
+                if engine.validFreezeTargets(for: ctx.applierSeat).contains(where: { $0.seat == seat && $0.tokenId == tid }) {
+                    confirmFreezeTarget(owner: seat, tokenId: tid)
+                } else {
+                    turnLabel?.text = "Freeze Token — pick an opponent token on the track."
+                }
+                return
+            }
+            if let ctx = shieldSelectionContext {
+                if engine.validSmallShieldTargets(for: ctx.applierSeat).contains(where: { $0.seat == seat && $0.tokenId == tid }) {
+                    confirmShieldTarget(owner: seat, tokenId: tid)
+                } else {
+                    turnLabel?.text = "Small Shield — pick your token on the track or home stretch."
+                }
+                return
+            }
+            handleTokenTap(seat: seat, tokenId: tid)
+            return
+        }
+
+        let diceLoc = touch.location(in: diceContainer)
+        let diceHits = diceContainer.nodes(at: diceLoc)
+        for node in diceHits {
+            var current: SKNode? = node
+            while let c = current {
+                if c.name == "diceArea" || c.name == "diceHitPad" {
+                    guard canAcceptDiceRoll() else { return }
+                    #if DEBUG
+                    if let s = debugStagedRoll {
+                        applyDebugRoll(s)
+                        return
+                    }
+                    #endif
+                    gameplayRollInFlight = true
+                    diceNode?.rollAnimated { [weak self] value in
+                        guard let self else { return }
+                        self.gameplayRollInFlight = false
+                        self.lastRollLabel?.text = "Rolled \(value)"
+                        self.handleGameplayRoll(value)
+                    }
+                    return
+                }
+                current = c.parent
+            }
+        }
+    }
+
+    private func tokenHit(at point: CGPoint) -> (LudoSeat, Int)? {
+        for node in boardContainer.nodes(at: point) {
+            if let hit = tokenIdentity(from: node) { return hit }
+        }
+        #if DEBUG
+        if debugPowerupArmTap {
+            return closestTokenHit(at: point, maxDistance: 36)
+        }
+        #endif
+        return nil
+    }
+
+    private func tokenIdentity(from node: SKNode) -> (LudoSeat, Int)? {
+        var current: SKNode? = node
+        while let c = current {
+            if let name = c.name, name.hasPrefix("token_") {
+                let parts = name.split(separator: "_")
+                if parts.count == 3, let raw = Int(parts[1]), let tid = Int(parts[2]),
+                   let seat = LudoSeat(rawValue: raw) {
+                    return (seat, tid)
+                }
+            }
+            current = c.parent
+        }
+        return nil
+    }
+
+    #if DEBUG
+    private func closestTokenHit(at point: CGPoint, maxDistance: CGFloat) -> (LudoSeat, Int)? {
+        let boardRoot = boardContainer.childNode(withName: "ludoBoard") ?? boardContainer
+        let pointInBoard = boardRoot.convert(point, from: boardContainer)
+        let hitRadius = maxDistance / max(boardContainer.xScale, 0.01)
+        var best: (seat: LudoSeat, id: Int, d: CGFloat)?
+        for (seat, nodes) in tokenNodes {
+            for (i, node) in nodes.enumerated() {
+                let d = hypot(node.position.x - pointInBoard.x, node.position.y - pointInBoard.y)
+                guard d <= hitRadius else { continue }
+                if best == nil || d < best!.d {
+                    best = (seat, i, d)
+                }
+            }
+        }
+        if let b = best { return (b.seat, b.id) }
+        return nil
+    }
+    #endif
+
+    #if DEBUG
+
+    private func setupDebugOverlayIfNeeded() {
+        guard debugPanelRoot == nil else { return }
+        let root = SKNode()
+        root.name = "debugRoot"
+
+        let toggle = makeDebugButton(title: "Debug", name: "dbgToggle", width: 76, height: 34)
+        root.addChild(toggle)
+
+        let sheetW: CGFloat = min(340, max(280, size.width * 0.88))
+        let sheetH: CGFloat = 286
+        let sheet = SKShapeNode(rectOf: CGSize(width: sheetW, height: sheetH), cornerRadius: 14)
+        sheet.fillColor = SKColor(white: 0.12, alpha: 0.94)
+        sheet.strokeColor = SKColor(white: 0.45, alpha: 0.85)
+        sheet.lineWidth = 1.2
+        sheet.name = "dbgSheet"
+        sheet.isHidden = true
+        root.addChild(sheet)
+        debugSheet = sheet
+
+        let title = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
+        title.text = "Debug mode"
+        title.fontSize = 16
+        title.fontColor = SKColor(white: 1, alpha: 0.95)
+        title.verticalAlignmentMode = .center
+        title.horizontalAlignmentMode = .center
+        title.position = CGPoint(x: 0, y: sheetH * 0.5 - 22)
+        sheet.addChild(title)
+
+        let staged = SKLabelNode(fontNamed: "AvenirNext-Medium")
+        staged.fontSize = 12
+        staged.fontColor = SKColor(white: 0.85, alpha: 0.9)
+        staged.verticalAlignmentMode = .center
+        staged.horizontalAlignmentMode = .center
+        staged.position = CGPoint(x: 0, y: sheetH * 0.5 - 48)
+        staged.text = "Next die: random"
+        sheet.addChild(staged)
+        debugStagedLabel = staged
+
+        let rowY = sheetH * 0.5 - 78
+        let dieW: CGFloat = 44
+        let gap: CGFloat = 6
+        let rowW = 6 * dieW + 5 * gap
+        var x0 = -rowW * 0.5 + dieW * 0.5
+        for v in 1...6 {
+            let b = makeDebugButton(title: "\(v)", name: "dbgDie\(v)", width: dieW, height: 32)
+            b.position = CGPoint(x: x0, y: rowY)
+            sheet.addChild(b)
+            x0 += dieW + gap
+        }
+
+        func addPreset(_ title: String, name: String, y: CGFloat) {
+            let b = makeDebugButton(title: title, name: name, width: sheetW - 36, height: 30)
+            b.position = CGPoint(x: 0, y: y)
+            sheet.addChild(b)
+        }
+
+        addPreset("Green token 0: post-lap @ start (lap 52)", name: "dbgPresetGreenStart", y: sheetH * 0.5 - 118)
+        addPreset("Green token 0: on fork (lap 54)", name: "dbgPresetGreenFork", y: sheetH * 0.5 - 154)
+        addPreset("Green token 0: home step 4", name: "dbgPresetGreenHome4", y: sheetH * 0.5 - 190)
+        addPreset("Rotate current seat", name: "dbgNextSeat", y: sheetH * 0.5 - 226)
+        addPreset("Clear staged die", name: "dbgClearDie", y: sheetH * 0.5 - 258)
+
+        let status = SKLabelNode(fontNamed: "Menlo-Regular")
+        status.fontSize = 10
+        status.fontColor = SKColor(white: 0.78, alpha: 0.95)
+        status.verticalAlignmentMode = .top
+        status.horizontalAlignmentMode = .left
+        status.numberOfLines = 0
+        status.preferredMaxLayoutWidth = sheetW - 28
+        status.position = CGPoint(x: -sheetW * 0.5 + 14, y: -sheetH * 0.5 + 12)
+        status.text = ""
+        sheet.addChild(status)
+        debugStatusLabel = status
+
+        debugPanelRoot = root
+    }
+
+    private func makeDebugButton(title: String, name: String, width: CGFloat, height: CGFloat) -> SKNode {
+        let n = SKNode()
+        n.name = name
+        let bg = SKShapeNode(rectOf: CGSize(width: width, height: height), cornerRadius: 8)
+        bg.fillColor = SKColor(white: 0.22, alpha: 0.95)
+        bg.strokeColor = SKColor(white: 0.5, alpha: 0.85)
+        bg.lineWidth = 1
+        n.addChild(bg)
+        let l = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
+        l.text = title
+        l.fontSize = 11
+        l.fontColor = SKColor(white: 1, alpha: 0.92)
+        l.verticalAlignmentMode = .center
+        l.horizontalAlignmentMode = .center
+        n.addChild(l)
+        return n
+    }
+
+    private func layoutDebugOverlay() {
+        guard let root = debugPanelRoot else { return }
+        let tx = size.width * 0.5 - 52
+        let ty = -size.height * 0.5 + 26
+        root.childNode(withName: "dbgToggle")?.position = CGPoint(x: tx, y: ty)
+
+        if let sheet = debugSheet {
+            sheet.position = CGPoint(x: 0, y: -size.height * 0.08)
+        }
+    }
+
+    private func refreshDebugPanel() {
+        guard debugModeEnabled else { return }
+        if let s = debugStagedRoll {
+            debugStagedLabel?.text = "Next die: \(s) (tap die to apply)"
+        } else {
+            debugStagedLabel?.text = "Next die: random (tap 1–6 to stage)"
+        }
+        var lines: [String] = []
+        lines.append("Turn: \(engine.currentSeat.displayName)")
+        lines.append("Finish order: \(engine.finishOrder.map(\.displayName).joined(separator: ", "))")
+        for seat in LudoSeat.allCases where LudoSeat.activeSeats(forPlayerCount: playerCount).contains(seat) {
+            if let sp = engine.spot(for: seat, tokenId: 0) {
+                lines.append("\(seat.displayName) t0: \(debugSpotSummary(sp))")
+            }
+        }
+        let fork = LudoBoardPath.publicPathForkIndexBeforeHomeColumn(for: .green)
+        lines.append("Green fork idx: \(fork) \(LudoBoardPath.publicTrack[fork])")
+        debugStatusLabel?.text = lines.joined(separator: "\n")
+    }
+
+    private func debugSpotSummary(_ spot: LudoTokenSpot) -> String {
+        switch spot {
+        case .yard: return "yard"
+        case .track(let p, let lap): return "track idx=\(p) lap=\(lap)"
+        case .home(let s): return "home step=\(s)"
+        case .finished: return "finished"
+        }
+    }
+
+    @discardableResult
+    private func handleDebugTouch(_ touch: UITouch) -> Bool {
+        guard let root = debugPanelRoot else { return false }
+        let loc = touch.location(in: root)
+        let hits = root.nodes(at: loc)
+        guard !hits.isEmpty else { return false }
+
+        var dbgName: String?
+        for node in hits {
+            var c: SKNode? = node
+            while let x = c {
+                if let n = x.name {
+                    if n == "dbgToggle" || n.hasPrefix("dbgDie") || n.hasPrefix("dbgPreset") || n == "dbgNextSeat"
+                        || n == "dbgClearDie"
+                    {
+                        dbgName = n
+                        break
+                    }
+                }
+                c = x.parent
+            }
+            if dbgName != nil { break }
+        }
+        guard let name = dbgName else { return false }
+
+        if name == "dbgToggle" {
+            debugModeEnabled.toggle()
+            debugSheet?.isHidden = !debugModeEnabled
+            if !debugModeEnabled {
+                debugStagedRoll = nil
+            }
+            refreshDebugPanel()
+            return true
+        }
+
+        guard debugModeEnabled else { return false }
+
+        if name.hasPrefix("dbgDie"), name.count == 7, let v = Int(String(name.dropFirst(6))), (1...6).contains(v) {
+            applyDebugRoll(v)
+            refreshDebugPanel()
+            return true
+        }
+
+        switch name {
+        case "dbgPresetGreenStart":
+            let e = LudoBoardPath.publicPathEntryIndex(for: .green)
+            engine.debugSetToken(for: .green, tokenId: 0, spot: .track(pathIndex: e, lapProgress: 52))
+        case "dbgPresetGreenFork":
+            let f = LudoBoardPath.publicPathForkIndexBeforeHomeColumn(for: .green)
+            engine.debugSetToken(for: .green, tokenId: 0, spot: .track(pathIndex: f, lapProgress: 54))
+        case "dbgPresetGreenHome4":
+            engine.debugSetToken(for: .green, tokenId: 0, spot: .home(step: 4))
+        case "dbgNextSeat":
+            engine.debugRotateCurrentSeat()
+        case "dbgClearDie":
+            debugStagedRoll = nil
+        default:
+            return false
+        }
+
+        syncTokenPositionsFromEngine()
+        refreshTokenVisuals()
+        refreshDebugPanel()
+        return true
+    }
+
+    #endif
+}
